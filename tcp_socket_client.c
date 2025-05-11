@@ -1,9 +1,7 @@
-#include "include/tcp_socket_client.h"
+#include "include/tcp_socket_component.h"
+
 #include <string.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
 #include "freertos/task.h"
-#include "freertos/stream_buffer.h"
 #include "lwip/sockets.h"
 #include "lwip/err.h"
 #include "lwip/sys.h"
@@ -20,10 +18,6 @@
 #define HOST_IP_ADDR         "192.168.0.100"
 
 QueueHandle_t connectionStateQueueHandler;   // TODO: mejorar este mecanismo
-
-// TODO: deberia venir por parametro
-extern StreamBufferHandle_t xStreamBufferReceiver;
-extern StreamBufferHandle_t xStreamBufferSender;
 
 static const char *TAG = "TCP CLIENT";
 
@@ -101,7 +95,7 @@ static void tcpClientSocket(void *pvParameters) {
             } else {
                 ESP_LOGI(TAG, "Successfully connected");
                 comms_start_up();
-                xTaskCreatePinnedToCore(tcpSocketReceiverTask, "tcp_client receiver", 4096, &sock, configMAX_PRIORITIES - 2, NULL, COMMS_HANDLER_CORE);
+                xTaskCreatePinnedToCore(tcpSocketReceiverTask, "tcp_client receiver", 4096, &sock, configMAX_PRIORITIES - 2, NULL, TCP_SOCKET_CORE);
 
                 newConnectionState(true);
                 tcpSocketSender(sock);
@@ -122,5 +116,5 @@ void initTcpClientSocket(QueueHandle_t connectionQueueHandler) {
     connectionStateQueueHandler = connectionQueueHandler;
     xStreamBufferSender = xStreamBufferCreate(STREAM_BUFFER_SIZE, STREAM_BUFFER_LENGTH_TRIGGER);
     xStreamBufferReceiver = xStreamBufferCreate(STREAM_BUFFER_SIZE, STREAM_BUFFER_LENGTH_TRIGGER);
-    xTaskCreatePinnedToCore(tcpClientSocket, "tcp client task", 4096, connectionStateQueueHandler,configMAX_PRIORITIES - 1, NULL, COMMS_HANDLER_CORE);
+    xTaskCreatePinnedToCore(tcpClientSocket, "tcp client task", 4096, connectionStateQueueHandler,configMAX_PRIORITIES - 1, NULL, TCP_SOCKET_CORE);
 }

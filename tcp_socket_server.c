@@ -1,9 +1,7 @@
-#include "include/tcp_socket_server.h"
+#include "include/tcp_socket_component.h"
+
 #include <string.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
 #include "freertos/task.h"
-#include "freertos/stream_buffer.h"
 #include "lwip/sockets.h"
 #include "lwip/err.h"
 #include "lwip/sys.h"
@@ -17,10 +15,6 @@
 #define PORT 8080
 
 QueueHandle_t connectionStateQueueHandler;
-
-// TODO: deberia venir por parametro
-extern StreamBufferHandle_t xStreamBufferReceiver;
-extern StreamBufferHandle_t xStreamBufferSender;
 
 static const char *TAG = "TCP SERVER";
 
@@ -43,7 +37,7 @@ static void newClientConnected(int8_t sock) {
 
     if (socketCounter == 1) {
         comms_start_up();
-        xTaskCreatePinnedToCore(tcpSocketSenderTask, "tcp server sender", 4096, NULL, configMAX_PRIORITIES - 2, NULL, COMMS_HANDLER_CORE);
+        xTaskCreatePinnedToCore(tcpSocketSenderTask, "tcp server sender", 4096, NULL, configMAX_PRIORITIES - 2, NULL, TCP_SOCKET_CORE);
     }
     updateConnectionState();
 }
@@ -185,7 +179,7 @@ static void socketOrchestrator(void *pvParameters) {
         }
 
         if (socketCounter < MAX_CLIENTS_CONNECTED) {
-            xTaskCreatePinnedToCore(socketClientsHandlerTask, "tcp server socket clients handler task", 4096, &sock, configMAX_PRIORITIES - 1, NULL, COMMS_HANDLER_CORE);
+            xTaskCreatePinnedToCore(socketClientsHandlerTask, "tcp server socket clients handler task", 4096, &sock, configMAX_PRIORITIES - 1, NULL, TCP_SOCKET_CORE);
         } else {
             close(sock);
             ESP_LOGE(TAG, "Max client limit reached, socket client closed");
@@ -201,5 +195,5 @@ void initTcpServerSocket(QueueHandle_t connectionQueueHandler) {
     connectionStateQueueHandler = connectionQueueHandler;
     xStreamBufferSender = xStreamBufferCreate(STREAM_BUFFER_SIZE, STREAM_BUFFER_LENGTH_TRIGGER);
     xStreamBufferReceiver = xStreamBufferCreate(STREAM_BUFFER_SIZE, STREAM_BUFFER_LENGTH_TRIGGER);
-    xTaskCreatePinnedToCore(socketOrchestrator, "socket orchestrator task", 4096, NULL,configMAX_PRIORITIES - 1, NULL, COMMS_HANDLER_CORE);
+    xTaskCreatePinnedToCore(socketOrchestrator, "socket orchestrator task", 4096, NULL,configMAX_PRIORITIES - 1, NULL, TCP_SOCKET_CORE);
 }
