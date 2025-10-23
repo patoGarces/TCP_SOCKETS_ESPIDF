@@ -21,6 +21,7 @@ static const char *TAG = "TCP SERVER";
 uint8_t serverClientConnected = false;
 int8_t listOfClients[MAX_CLIENTS_CONNECTED];
 uint8_t socketCounter = 0;
+TaskHandle_t senderTaskHandle = NULL;
 
 static void tcpSocketSenderTask(void *pvParameters);
 
@@ -37,93 +38,145 @@ static void newClientConnected(int8_t sock) {
 
     if (socketCounter == 1) {
         comms_start_up();
-        xTaskCreatePinnedToCore(tcpSocketSenderTask, "tcp server sender", 4096, NULL, configMAX_PRIORITIES - 2, NULL, TCP_SOCKET_CORE);
+        xStreamBufferReset(xStreamBufferSender);
+        xTaskCreatePinnedToCore(tcpSocketSenderTask, "tcp server sender", 4096, NULL, configMAX_PRIORITIES - 2, &senderTaskHandle, TCP_SOCKET_CORE);
     }
     updateConnectionState();
+    ESP_LOGI(TAG, "Cliente conectado. Total: %d", socketCounter);
 }
 
-static void removeClientConnected(uint8_t sock) {
-    for(uint8_t i=0; i< socketCounter; i++) {
+static void removeClientConnected(int8_t sock) {
+    bool found = false;
+    
+    for(uint8_t i = 0; i < socketCounter; i++) {
         if(listOfClients[i] == sock) {
-            shutdown(sock, 0);
+            ESP_LOGI(TAG, "Cerrando socket %d en posición %d", sock, i);
+            shutdown(sock, SHUT_RDWR);
             close(sock);
+            
+            // Muevo el último socket a la posición del eliminado
+            listOfClients[i] = listOfClients[socketCounter - 1];
+            listOfClients[socketCounter - 1] = -1; // Limpio la última posición
+            socketCounter--;
+            found = true;
+            break; // CRÍTICO: salir después de encontrar
         }
+    }
 
-        // Muevo el último socket a la posición del eliminado, para no tener "huecos" en la lista
-        listOfClients[i] = listOfClients[socketCounter - 1];
-        socketCounter--;
-        updateConnectionState();
+    if (!found) {
+        ESP_LOGE(TAG, "Socket %d no encontrado para eliminar", sock);
         return;
     }
 
-    ESP_LOGE(TAG, "Socket %d no encontrado para eliminar", sock);
+    updateConnectionState();
+    ESP_LOGI(TAG, "Cliente desconectado. Quedan: %d", socketCounter);
+    
+    // Si no quedan clientes, el sender task se auto-eliminará
+    if (socketCounter == 0) {
+        ESP_LOGI(TAG, "No quedan clientes conectados");
+    }
 }
 
 static void tcpSocketReceiver(int8_t sock) {
     char rx_buffer[128];
-    xStreamBufferReset(xStreamBufferReceiver);
+    int consecutiveErrors = 0;
 
     while (serverClientConnected) {
-
         int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+        
         if (len > 0) {
-            xStreamBufferSend(xStreamBufferReceiver,rx_buffer,len,1);
-        } else {
+            consecutiveErrors = 0;
+            xStreamBufferSend(xStreamBufferReceiver, rx_buffer, len, pdMS_TO_TICKS(10));
+        } 
+        else if (len == 0) {
+            // Cliente cerró la conexión ordenadamente
+            ESP_LOGI(TAG, "Cliente %d cerró la conexión", sock);
             break;
+        } 
+        else {
+            // Error en recv
+            consecutiveErrors++;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // No hay datos disponibles, continuar
+                consecutiveErrors = 0;
+            } else {
+                ESP_LOGE(TAG, "Error recv socket %d: errno %d", sock, errno);
+                if (consecutiveErrors > 3) {
+                    break;
+                }
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(25));
     }
+    
+    ESP_LOGI(TAG, "Saliendo de receiver para socket %d", sock);
 }
 
-/* Hago un broadcast de los datos enviados a todos los clientes, todos reciben la misma data*/
+/* Broadcast de datos a todos los clientes */
 static void tcpSocketSenderTask(void *pvParameters) {
-
     char received_data[100];
-    xStreamBufferReset(xStreamBufferSender);
+    
+    ESP_LOGI(TAG, "Sender task iniciado");
     
     while (serverClientConnected) {
-        BaseType_t bytesStreamReceived = xStreamBufferReceive(xStreamBufferSender, received_data, sizeof(received_data), 0);
+        BaseType_t bytesStreamReceived = xStreamBufferReceive(xStreamBufferSender, received_data, sizeof(received_data), pdMS_TO_TICKS(100));
 
-        if (bytesStreamReceived > 1) {
-
-            for(uint8_t i=0; i< socketCounter; i++) {
-                if (listOfClients[i] > 0) {
+        if (bytesStreamReceived > 0) {
+            // Iterar sobre copia de socketCounter por si cambia durante el envío
+            uint8_t currentSocketCount = socketCounter;
+            
+            for(uint8_t i = 0; i < currentSocketCount && i < socketCounter; i++) {
+                if (listOfClients[i] >= 0) {
                     int errSend = lwip_send(listOfClients[i], received_data, bytesStreamReceived, 0);
                     if (errSend < 0) {
-                        ESP_LOGE(TAG, "Error conexion perdida 1, errno %d", errno);
-                        removeClientConnected(listOfClients[i]);
-                        i--;            // elimine el actual, voy al siguiente
+                        ESP_LOGE(TAG, "Error enviando a socket %d, errno %d", listOfClients[i], errno);
+                        int8_t sockToRemove = listOfClients[i];
+                        removeClientConnected(sockToRemove);
+                        
+                        // Reiniciar el loop ya que la lista cambió
+                        break;
                     } 
                 }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(25));
+        
+        // Pequeña pausa para no saturar
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
+    ESP_LOGI(TAG, "Sender task finalizando");
+    senderTaskHandle = NULL;
     vTaskDelete(NULL);
 }
 
 static void socketClientsHandlerTask(void *pvParameters) {
+    // CRÍTICO: copiar el valor inmediatamente
+    int sock = *((int *) pvParameters);
+    
+    // Liberar el semáforo para que socketOrchestrator pueda continuar
+    vTaskDelay(pdMS_TO_TICKS(10));
 
-    int sock = *(int *) pvParameters;
-
-    // Calculo demora en al deteccion de perdida de conexion: keepIdle + (keepInterval × keepCount) 
+    // Configuración keepalive más agresiva
     int keepAlive = 1;
-    int keepIdle = 1;           // segundos sin actividad
-    int keepInterval = 1;       // periodo de reintento
-    int keepCount = 2;          // cantidad de intentos
+    int keepIdle = 5;           // segundos sin actividad
+    int keepInterval = 3;       // periodo de reintento
+    int keepCount = 3;          // cantidad de intentos
+    
+    // Timeout de recepción
+    struct timeval timeout;
+    timeout.tv_sec = 30;
+    timeout.tv_usec = 0;
 
-    // Set tcp keepalive option
     setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(int));
     setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(int));
     setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
     setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
     newClientConnected(sock);
-    ESP_LOGI(TAG, "new socket client connected: %d", socketCounter);
     
-    tcpSocketReceiver(sock);    // loop mientras ese socket este abierto
+    tcpSocketReceiver(sock);    // loop mientras ese socket esté abierto
 
     removeClientConnected(sock);
 
@@ -148,52 +201,100 @@ static void socketOrchestrator(void *pvParameters) {
         vTaskDelete(NULL);
         return;
     }
+    
     int opt = 1;
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     int err = bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
     if (err != 0) {
         ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
-        ESP_LOGE(TAG, "IPPROTO: %d", addr_family);
         close(listen_sock);
         vTaskDelete(NULL);
+        return;
     }
 
-    err = listen(listen_sock, 2);               // Hasta 2 conexiones pendientes
+    err = listen(listen_sock, MAX_CLIENTS_CONNECTED);
     if (err != 0) {
         ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
         close(listen_sock);
         vTaskDelete(NULL);
+        return;
     }
 
-    ESP_LOGI(TAG, "Socket listening");
+    ESP_LOGI(TAG, "Socket listening on port %d", PORT);
 
     while (1) {
-        struct sockaddr_storage source_addr; // Large enough for both IPv4 or IPv6
+        struct sockaddr_storage source_addr;
         socklen_t addr_len = sizeof(source_addr);
 
-        int8_t sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
+        int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
         if (sock < 0) {
             ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
-            break;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
 
         if (socketCounter < MAX_CLIENTS_CONNECTED) {
-            xTaskCreatePinnedToCore(socketClientsHandlerTask, "tcp server socket clients handler task", 4096, &sock, configMAX_PRIORITIES - 1, NULL, TCP_SOCKET_CORE);
+            // CRÍTICO: pasar copia del socket, no la dirección de variable local
+            static int sock_copy;
+            sock_copy = sock;
+            
+            BaseType_t taskCreated = xTaskCreatePinnedToCore(
+                socketClientsHandlerTask, 
+                "tcp client handler", 
+                4096, 
+                &sock_copy,  // Pasar dirección de variable estática
+                configMAX_PRIORITIES - 1, 
+                NULL, 
+                TCP_SOCKET_CORE
+            );
+            
+            if (taskCreated != pdPASS) {
+                ESP_LOGE(TAG, "Error creando task para cliente");
+                close(sock);
+            } else {
+                // Dar tiempo a que la task copie el valor
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
         } else {
+            ESP_LOGW(TAG, "Max client limit reached (%d), rechazando conexión", MAX_CLIENTS_CONNECTED);
             close(sock);
-            ESP_LOGE(TAG, "Max client limit reached, socket client closed");
         }
-
-        vTaskDelay(pdMS_TO_TICKS(1000));
     }
+    
     close(listen_sock);
     vTaskDelete(NULL);
 }
 
 void initTcpServerSocket(QueueHandle_t connectionQueueHandler) {
     connectionStateQueueHandler = connectionQueueHandler;
+    
+    // Inicializar lista de clientes
+    for(uint8_t i = 0; i < MAX_CLIENTS_CONNECTED; i++) {
+        listOfClients[i] = -1;
+    }
+    
+    socketCounter = 0;
+    serverClientConnected = false;
+    senderTaskHandle = NULL;
+    
     xStreamBufferSender = xStreamBufferCreate(STREAM_BUFFER_SIZE, STREAM_BUFFER_LENGTH_TRIGGER);
     xStreamBufferReceiver = xStreamBufferCreate(STREAM_BUFFER_SIZE, STREAM_BUFFER_LENGTH_TRIGGER);
-    xTaskCreatePinnedToCore(socketOrchestrator, "socket orchestrator task", 4096, NULL,configMAX_PRIORITIES - 1, NULL, TCP_SOCKET_CORE);
+    
+    if (xStreamBufferSender == NULL || xStreamBufferReceiver == NULL) {
+        ESP_LOGE(TAG, "Error creando stream buffers");
+        return;
+    }
+    
+    xTaskCreatePinnedToCore(
+        socketOrchestrator, 
+        "socket orchestrator", 
+        4096, 
+        NULL,
+        configMAX_PRIORITIES - 1, 
+        NULL, 
+        TCP_SOCKET_CORE
+    );
+    
+    ESP_LOGI(TAG, "TCP Server inicializado");
 }
