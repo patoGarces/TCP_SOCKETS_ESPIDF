@@ -9,15 +9,11 @@
 
 #include "../../../include/comms.h"
 
-#define STREAM_BUFFER_SIZE              500
-#define STREAM_BUFFER_LENGTH_TRIGGER    15
-
 #define PORT 8080
-
 
 #define HOST_IP_ADDR         "192.168.0.100"
 
-QueueHandle_t connectionStateQueueHandler;   // TODO: mejorar este mecanismo
+static tcp_socket_config_t socketConfig;
 
 static const char *TAG = "TCP CLIENT";
 
@@ -25,7 +21,7 @@ uint8_t serverClientConnected = false;
 
 static void newConnectionState(bool state) {
     serverClientConnected = state;
-    if (xQueueOverwrite(connectionStateQueueHandler, &state) != pdPASS) {
+    if (xQueueOverwrite(socketConfig.connectionQueueHandler, &state) != pdPASS) {
         ESP_LOGE(TAG, "Error al enviar el nuevo estado de connection");
     }
 }
@@ -33,13 +29,13 @@ static void newConnectionState(bool state) {
 static void tcpSocketReceiverTask(void *pvParameters) {
     int socket = *(int *) pvParameters;
     char rx_buffer[128];
-    xStreamBufferReset(xStreamBufferReceiver);
+    xStreamBufferReset(socketConfig.xStreamBufferRecv);
 
     while (serverClientConnected) {
 
         int len = recv(socket, rx_buffer, sizeof(rx_buffer) - 1, 0);
         if (len > 0) {
-            xStreamBufferSend(xStreamBufferReceiver,rx_buffer,len,1);
+            xStreamBufferSend(socketConfig.xStreamBufferRecv,rx_buffer,len,1);
         }
 
         vTaskDelay(pdMS_TO_TICKS(25));
@@ -53,10 +49,10 @@ static void tcpSocketSender(int sock) {
 
     ESP_LOGI(TAG, "socket content: %d", sock);
 
-    xStreamBufferReset(xStreamBufferSender);
+    xStreamBufferReset(socketConfig.xStreamBufferSend);
     
     while (serverClientConnected) {
-        BaseType_t bytesStreamReceived = xStreamBufferReceive(xStreamBufferSender, received_data, sizeof(received_data), 0);
+        BaseType_t bytesStreamReceived = xStreamBufferReceive(socketConfig.xStreamBufferSend, received_data, sizeof(received_data), 0);
 
         if (bytesStreamReceived > 1) {
             int errSend = lwip_send(sock, received_data, bytesStreamReceived, 0);
@@ -70,8 +66,6 @@ static void tcpSocketSender(int sock) {
 }
 
 static void tcpClientSocket(void *pvParameters) {
-    QueueHandle_t connectionStateQueueHandler = (QueueHandle_t)pvParameters;
-
     struct sockaddr_in dest_addr = {
         .sin_addr.s_addr = inet_addr(HOST_IP_ADDR),
         .sin_family = AF_INET,
@@ -112,9 +106,7 @@ static void tcpClientSocket(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
-void initTcpClientSocket(QueueHandle_t connectionQueueHandler) {
-    connectionStateQueueHandler = connectionQueueHandler;
-    xStreamBufferSender = xStreamBufferCreate(STREAM_BUFFER_SIZE, STREAM_BUFFER_LENGTH_TRIGGER);
-    xStreamBufferReceiver = xStreamBufferCreate(STREAM_BUFFER_SIZE, STREAM_BUFFER_LENGTH_TRIGGER);
-    xTaskCreatePinnedToCore(tcpClientSocket, "tcp client task", 4096, connectionStateQueueHandler,configMAX_PRIORITIES - 1, NULL, TCP_SOCKET_CORE);
+void initTcpClientSocket(tcp_socket_config_t config) {
+    socketConfig = config;
+    xTaskCreatePinnedToCore(tcpClientSocket, "tcp client task", 4096, NULL, configMAX_PRIORITIES - 1, NULL, TCP_SOCKET_CORE);
 }

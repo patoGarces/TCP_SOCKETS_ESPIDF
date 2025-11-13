@@ -10,10 +10,13 @@
 
 #define MAX_CLIENTS_CONNECTED   3
 
-extern StreamBufferHandle_t xStreamBufferReceiver;
-extern StreamBufferHandle_t xStreamBufferSender;
+typedef struct {
+    QueueHandle_t connectionQueueHandler;
+    StreamBufferHandle_t xStreamBufferSend;
+    StreamBufferHandle_t xStreamBufferRecv;
+}tcp_socket_config_t;
 
-void initTcpServerSocket(QueueHandle_t connectionQueueHandler);
-void initTcpClientSocket(QueueHandle_t connectionQueueHandler);
+void initTcpServerSocket(tcp_socket_config_t config);
+void initTcpClientSocket(tcp_socket_config_t config);
 
 #endif

@@ -9,25 +9,22 @@
 
 #include "../../../include/comms.h"
 
-#define STREAM_BUFFER_SIZE              500
-#define STREAM_BUFFER_LENGTH_TRIGGER    15
-
 #define PORT 8080
-
-QueueHandle_t connectionStateQueueHandler;
 
 static const char *TAG = "TCP SERVER";
 
-uint8_t serverClientConnected = false;
-int8_t listOfClients[MAX_CLIENTS_CONNECTED];
-uint8_t socketCounter = 0;
-TaskHandle_t senderTaskHandle = NULL;
+static tcp_socket_config_t socketConfig;
+static uint8_t serverClientConnected = false;
+static int8_t listOfClients[MAX_CLIENTS_CONNECTED];
+static uint8_t socketCounter = 0;
+
+static TaskHandle_t senderTaskHandle = NULL;
 
 static void tcpSocketSenderTask(void *pvParameters);
 
 static void updateConnectionState() {
     serverClientConnected = socketCounter > 0;
-    if (xQueueOverwrite(connectionStateQueueHandler, &socketCounter) != pdPASS) {
+    if (xQueueOverwrite(socketConfig.connectionQueueHandler, &socketCounter) != pdPASS) {
         ESP_LOGE(TAG, "Error al enviar el nuevo estado de connection");
     }
 }
@@ -38,7 +35,7 @@ static void newClientConnected(int8_t sock) {
 
     if (socketCounter == 1) {
         comms_start_up();
-        xStreamBufferReset(xStreamBufferSender);
+        xStreamBufferReset(socketConfig.xStreamBufferSend);
         xTaskCreatePinnedToCore(tcpSocketSenderTask, "tcp server sender", 4096, NULL, configMAX_PRIORITIES - 2, &senderTaskHandle, TCP_SOCKET_CORE);
     }
     updateConnectionState();
@@ -86,7 +83,7 @@ static void tcpSocketReceiver(int8_t sock) {
         
         if (len > 0) {
             consecutiveErrors = 0;
-            xStreamBufferSend(xStreamBufferReceiver, rx_buffer, len, pdMS_TO_TICKS(10));
+            xStreamBufferSend(socketConfig.xStreamBufferRecv, rx_buffer, len, pdMS_TO_TICKS(10));
         } 
         else if (len == 0) {
             // Cliente cerró la conexión ordenadamente
@@ -120,7 +117,7 @@ static void tcpSocketSenderTask(void *pvParameters) {
     ESP_LOGI(TAG, "Sender task iniciado");
     
     while (serverClientConnected) {
-        BaseType_t bytesStreamReceived = xStreamBufferReceive(xStreamBufferSender, received_data, sizeof(received_data), pdMS_TO_TICKS(100));
+        BaseType_t bytesStreamReceived = xStreamBufferReceive(socketConfig.xStreamBufferSend, received_data, sizeof(received_data), pdMS_TO_TICKS(100));
 
         if (bytesStreamReceived > 0) {
             // Iterar sobre copia de socketCounter por si cambia durante el envío
@@ -266,8 +263,8 @@ static void socketOrchestrator(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
-void initTcpServerSocket(QueueHandle_t connectionQueueHandler) {
-    connectionStateQueueHandler = connectionQueueHandler;
+void initTcpServerSocket(tcp_socket_config_t config) {
+    socketConfig = config;
     
     // Inicializar lista de clientes
     for(uint8_t i = 0; i < MAX_CLIENTS_CONNECTED; i++) {
@@ -278,10 +275,7 @@ void initTcpServerSocket(QueueHandle_t connectionQueueHandler) {
     serverClientConnected = false;
     senderTaskHandle = NULL;
     
-    xStreamBufferSender = xStreamBufferCreate(STREAM_BUFFER_SIZE, STREAM_BUFFER_LENGTH_TRIGGER);
-    xStreamBufferReceiver = xStreamBufferCreate(STREAM_BUFFER_SIZE, STREAM_BUFFER_LENGTH_TRIGGER);
-    
-    if (xStreamBufferSender == NULL || xStreamBufferReceiver == NULL) {
+    if (socketConfig.xStreamBufferSend == NULL || socketConfig.xStreamBufferRecv == NULL) {
         ESP_LOGE(TAG, "Error creando stream buffers");
         return;
     }
